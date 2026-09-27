@@ -2,7 +2,7 @@ name: OpenList compatibility check
 
 on:
   push:
-    branches: [openlist-compat]
+    branches: [main]
   workflow_dispatch:
 
 jobs:

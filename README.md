@@ -1,27 +1,38 @@
 <div align="center">
 <img alt="icon-512.png" height="80" src="ani-rss-ui/public/icon-512.png"/>
-<h1 align="center" style="margin-top: 0">ANI-RSS</h1>
+<h1 align="center" style="margin-top: 0">ANI-RSS OpenList</h1>
 <p align="center">
 <strong>基于RSS自动追番、订阅、下载、刮削、洗版</strong>
 </p>
 
-[快速开始](https://docs.wushuo.top/start)
+[上游快速开始](https://docs.wushuo.top/start)
 |
-[使用文档](https://docs.wushuo.top/add-rss)
+[上游使用文档](https://docs.wushuo.top/add-rss)
 |
-[Docker部署](https://docs.wushuo.top/deploy/docker)
+[上游 Docker 部署](https://docs.wushuo.top/deploy/docker)
 |
 [常见问题](https://docs.wushuo.top/faq)
 |
 [参与开发](https://docs.wushuo.top/dev/basic)
 
-[![GitHub](https://img.shields.io/badge/-GitHub-181717?logo=github)](https://github.com/wushuo894/ani-rss)
-![GitHub License](https://img.shields.io/github/license/wushuo894/ani-rss)
-[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/wushuo894/ani-rss?color=blue&label=download&sort=semver)](https://github.com/wushuo894/ani-rss/releases/latest)
-[![GitHub all releases](https://img.shields.io/github/downloads/wushuo894/ani-rss/total?color=blue&label=github%20downloads)](https://docs.wushuo.top/history)
+[![GitHub](https://img.shields.io/badge/-GitHub-181717?logo=github)](https://github.com/KKKKeybird/ani-rss-openlist)
+![GitHub License](https://img.shields.io/github/license/KKKKeybird/ani-rss-openlist)
+[![OpenList compatibility check](https://github.com/KKKKeybird/ani-rss-openlist/actions/workflows/openlist-check.yml/badge.svg)](https://github.com/KKKKeybird/ani-rss-openlist/actions/workflows/openlist-check.yml)
 [![telegram](https://img.shields.io/static/v1?label=telegram&amp;message=ani-rss&amp;color=blue)](https://t.me/ani_rss)
 
 </div>
+
+## 关于这个 fork
+
+这是基于 [ANI-RSS 上游项目](https://github.com/wushuo894/ani-rss) 的社区维护 fork。这里的 `main` 持续维护原生 OpenList 下载器，供需要 OpenList 的用户跟踪和贡献；它不是上游官方发布版本。
+
+当前实现支持 Ani-RSS 创建的 OpenList 任务列表、进度和标签持久化，云端重命名与移动、完成通知、删除及保存路径调整。接口按 [OpenList v4.2.6 官方文档](https://doc.oplist.org/api/apidocs)核对，具体改动和待验证事项见 [兼容路线与实现记录](docs/openlist-compat-evaluation.md)。代码尚未在真实 OpenList Driver 上完成端到端验证，请先在测试环境使用。
+
+`main` 通过后会自动生成 [GitHub Release](https://github.com/KKKKeybird/ani-rss-openlist/releases) 并构建多架构 Docker 镜像。镜像发布到 `ghcr.io/kkkkeybird/ani-rss-openlist:latest`，OpenJ9 变体使用 `:openj9`；版本标签随每次发布生成。这个 fork 不会覆盖上游的 Docker 镜像。
+
+OpenList 没有通用的做种比率、上传限速与全局 Tracker API；这些 qBittorrent 功能无法在 OpenList 后端等价实现。上游文档适用于通用功能，OpenList 的差异以本仓库记录为准。
+
+## 上游项目说明（保留）
 
 ![image](https://github.com/wushuo894/ani-rss-docs/raw/main/docs/image/screenshot/screenshot.webp#gh-light-mode-only)
 ![image](https://github.com/wushuo894/ani-rss-docs/raw/main/docs/image/screenshot/screenshot-dark.webp#gh-dark-mode-only)

@@ -1,10 +1,10 @@
 # Ani-RSS 与 OpenList 的兼容路线评估
 
-基线：Ani-RSS `v3.2.38`。本分支开始维护原生 OpenList 下载器；NAS 尚未部署。
+基线：Ani-RSS `v3.2.38`。本 fork 的 `main` 维护原生 OpenList 下载器；NAS 尚未部署。
 
 ## 结论
 
-优先在本分支维护现有的 `OpenList` 下载器。将 OpenList 包装成 Aria2 JSON-RPC 服务虽然可以接收下载任务，但无法只靠外部插件保留 Ani-RSS 的重命名、完成通知和部分资源格式行为。若仍需修改 Ani-RSS，直接维护原生下载器的代码面更小，现有配置也可以原样沿用。
+优先在本 fork 维护现有的 `OpenList` 下载器。将 OpenList 包装成 Aria2 JSON-RPC 服务虽然可以接收下载任务，但无法只靠外部插件保留 Ani-RSS 的重命名、完成通知和部分资源格式行为。若仍需修改 Ani-RSS，直接维护原生下载器的代码面更小，现有配置也可以原样沿用。
 
 ## 路线 A：Aria2 JSON-RPC 兼容服务
 
@@ -25,10 +25,10 @@ Ani-RSS 的 `Aria2` 后端调用 `getGlobalStat`、`addTorrent`、`tellActive`�
 
 `v3.2.38` 已有 `OpenList.java`、`OpenListUtil.java`、OpenList 配置和任务/文件实体。下载流程已经处理提交离线任务、等待状态、重试、云端重命名、移动文件及完成通知。沿用此路线不需要转换既有的 `config.v2.json` 和 `ani.v2.json`。
 
-已在本分支实现：
+已在本 fork 实现：
 
 1. 按 OpenList `v4.2.6` 的 API 修正任务重试的 `tid` 查询参数、浮点进度与 `total_bytes` 整数类型，并检查 JSON 返回码和批量删除的逐项错误。
-2. 将 Ani-RSS 创建的任务 ID、保存路径、标签、进度与输出文件清单持久保存到配置目录的 `cache/openlist-tasks.json`，供任务列表、完成通知、删除与路径调整使用。该文件只记录本分支创建的任务，不会导入 OpenList 中其他任务。
+2. 将 Ani-RSS 创建的任务 ID、保存路径、标签、进度与输出文件清单持久保存到配置目录的 `cache/openlist-tasks.json`，供任务列表、完成通知、删除与路径调整使用。该文件只记录本 fork 创建的任务，不会导入 OpenList 中其他任务。
 3. 下载轮询增加间隔。离线任务成功后等待文件出现，调用云端重命名和移动，并等待移动任务及目标文件可见后才标记完成。暂存目录使用独立名称；只在确认没有剩余文件时清理。
 4. 完成标签经任务记录去重，沿用 Ani-RSS 通用完成通知。原先按文件名模糊匹配并删除备用 RSS 文件的逻辑已移除，改由通用任务清理流程处理。
 
@@ -41,7 +41,7 @@ Ani-RSS 的 `Aria2` 后端调用 `getGlobalStat`、`addTorrent`、`tellActive`�
 后续维护重点：
 
 1. 保留下载器选择入口及相关配置字段，避免合并上游改动时把 OpenList 实现或 UI 选项删掉。
-2. 为自建镜像使用固定版本或摘要，并在合并上游版本时运行兼容检查。上游移除 OpenList 后，后续合并可能产生冲突，需要由本分支维护。
+2. 为自建镜像使用固定版本或摘要，并在合并上游版本时运行兼容检查。上游移除 OpenList 后，后续合并可能产生冲突，需要由本 fork 维护。
 
 ## OpenList API 核对
 
@@ -59,4 +59,4 @@ Ani-RSS 的 `Aria2` 后端调用 `getGlobalStat`、`addTorrent`、`tellActive`�
 - `ani-rss-application/src/main/java/ani/rss/download/OpenList.java`
 - `ani-rss-application/src/main/java/ani/rss/util/other/OpenListUtil.java`
 
-本分支从 `v3.2.38` 建立。NAS 仍使用原配置与容器。
+本 fork 的 OpenList 实现从 `v3.2.38` 建立。NAS 仍使用原配置与容器。
