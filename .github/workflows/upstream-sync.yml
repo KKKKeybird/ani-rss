@@ -125,6 +125,11 @@ jobs:
               echo "PR #${number}: Copilot review is ${review:-pending}; not merging"
               continue
             fi
+            if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
+              --jq '.[] | select(.state == "CHANGES_REQUESTED") | .user.login' | grep -q .; then
+              echo "PR #${number}: a reviewer requested changes; not merging"
+              continue
+            fi
             gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
             gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref main
             echo "Merged PR #${number} and dispatched fork release build"
