@@ -32,7 +32,7 @@
 
 仓库每 6 小时检查一次上游正式 Release（不含预发布），按发布时间逐个合并到 `sync/upstream-*` 分支并创建 PR。PR 会请求 Copilot 审查并运行 OpenList 回归测试与打包检查；只有 Copilot 对最新提交明确批准且检查成功，才会自动合并并触发本 fork 的 Release 和 Docker 构建。合并冲突、审查意见或检查失败时保留 PR 等待处理。GitHub Copilot 的批准能力目前属于公开预览，需在仓库设置中启用；未启用时同步 PR 会停在审查环节，不会绕过审查自动合并。跟踪的上游版本记录在 [`.github/upstream-release.txt`](.github/upstream-release.txt)。
 
-自动创建同步 PR 还需要在仓库 Settings → Actions → General → Workflow permissions 中开启 **Allow GitHub Actions to create and approve pull requests**。这项仓库级权限当前尚未启用；自动同步总开关 `UPSTREAM_SYNC_ENABLED` 也保持关闭，定时任务不会改动仓库。完成权限配置后再打开总开关。Copilot 批准功能也需要在 Settings → Copilot → Code review 中开启 **Allow Copilot to approve pull requests**。
+自动创建同步 PR 需要在仓库 Settings → Actions → General → Workflow permissions 中开启 **Allow GitHub Actions to create and approve pull requests**，并把仓库变量 `UPSTREAM_SYNC_ENABLED` 设为 `true`。Copilot 批准功能需要在 Settings → Copilot → Code review 中开启 **Allow Copilot to approve pull requests**。如果 Copilot 无法批准，PR 会保留，自动合并不会绕过审查。
 
 OpenList 没有通用的做种比率、上传限速与全局 Tracker API；这些 qBittorrent 功能无法在 OpenList 后端等价实现。上游文档适用于通用功能，OpenList 的差异以本仓库记录为准。
 
