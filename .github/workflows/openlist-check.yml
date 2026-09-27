@@ -1,0 +1,19 @@
+name: OpenList compatibility check
+
+on:
+  push:
+    branches: [openlist-compat]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Compile and run OpenList tests
+        run: mvn -B -pl ani-rss-application -am -Dtest=OpenListTaskStoreTest -Dsurefire.failIfNoSpecifiedTests=false test

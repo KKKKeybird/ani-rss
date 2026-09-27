@@ -5,17 +5,14 @@ import ani.rss.commons.FileUtils;
 import ani.rss.config.OpenListConfig;
 import ani.rss.entity.*;
 import ani.rss.entity.torrent.TorrentsInfo;
-import ani.rss.enums.NotificationStatusEnum;
-import ani.rss.enums.StringEnum;
+import ani.rss.enums.TorrentsStateEnum;
+import ani.rss.enums.TorrentsTagEnum;
 import ani.rss.util.other.ConfigUtil;
-import ani.rss.util.other.NotificationUtil;
 import ani.rss.util.other.OpenListUtil;
 import ani.rss.util.other.TorrentUtil;
-import cn.hutool.core.date.DateTime;
-import cn.hutool.core.date.DateUtil;
+import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.lang.Assert;
-import cn.hutool.core.text.StrFormatter;
 import cn.hutool.core.util.ReUtil;
 import cn.hutool.core.util.StrUtil;
 import lombok.RequiredArgsConstructor;
@@ -42,11 +39,11 @@ public class OpenList implements BaseDownload {
             return CONFIG.getDownloadToolPassword();
         }
     });
+    private final OpenListTaskStore taskStore = new OpenListTaskStore(
+            new File(ConfigUtil.getConfigDir(), "cache/openlist-tasks.json"));
 
     @Override
     public Boolean login(Boolean test, Config config) {
-        log.warn("OpenList 将在后续版本停止支持!");
-
         String host = config.getDownloadToolHost();
         String password = config.getDownloadToolPassword();
         if (StrUtil.isBlank(host) || StrUtil.isBlank(password)) {
@@ -69,7 +66,40 @@ public class OpenList implements BaseDownload {
 
     @Override
     public List<TorrentsInfo> getTorrentsInfos() {
-        return List.of();
+        List<TorrentsInfo> result = new ArrayList<>();
+        for (OpenListTaskStore.Task task : taskStore.list()) {
+            if (!task.isCompleted()) {
+                openListUtil.taskInfo(task.getId()).ifPresent(info -> {
+                    taskStore.progress(task.getId(), info);
+                    if (info.getState() == OpenListTaskInfo.State.Succeeded) {
+                        try {
+                            finishTask(info.getId(), System.currentTimeMillis() + 60_000L);
+                        } catch (Exception e) {
+                            log.warn("OpenList 文件整理待重试 {}: {}", info.getId(), e.getMessage());
+                        }
+                    }
+                });
+            }
+            task = taskStore.get(task.getId());
+            long size = task.getSize();
+            long completed = task.isCompleted() ? size : size * task.getProgress() / 100;
+            List<String> taskFiles = List.copyOf(task.getFiles());
+            TorrentsInfo info = new TorrentsInfo()
+                    .setId(task.getId()).setHash(task.getHash()).setName(task.getName())
+                    .setState(task.isCompleted() ? TorrentsStateEnum.stoppedUP
+                            : OpenListTaskInfo.State.Failed.name().equals(task.getState())
+                            ? TorrentsStateEnum.error : TorrentsStateEnum.downloading)
+                    .setCategory(TorrentsTagEnum.ANI_RSS.getValue())
+                    .setTagList(List.copyOf(task.getTags()))
+                    .setSavePath(task.getSavePath())
+                    .setFilesSupplier(() -> taskFiles)
+                    .progress(completed, size);
+            if (!task.isCompleted()) {
+                info.setProgress((double) task.getProgress());
+            }
+            result.add(info);
+        }
+        return result;
     }
 
     @Override
@@ -79,30 +109,17 @@ public class OpenList implements BaseDownload {
 
         String magnet = TorrentUtil.getMagnet(torrentFile);
         String reName = item.getReName();
-        String path = savePath + "/" + reName;
-        Boolean standbyRss = CONFIG.getStandbyRss();
-        Boolean delete = CONFIG.getDelete();
-        Boolean coexist = CONFIG.getCoexist();
+        String path = savePath + "/.ani-rss-openlist-" + UUID.randomUUID();
+        String tid = null;
         try {
-            openListUtil.mkdir(path);
-
-            // 删除残留任务
-            openListUtil.deleteResidualTasks(magnet);
-
-            // 洗版，删除备 用RSS 所下载的视频
-            if (standbyRss && delete && !coexist) {
-                String s = ReUtil.get(StringEnum.SEASON_REG, reName, 0);
-                String finalSavePath = savePath;
-                openListUtil.fsList(savePath, true)
-                        .stream()
-                        .map(OpenListFileInfo::getName)
-                        .filter(name -> name.contains(s))
-                        .forEach(name -> {
-                            openListUtil.fsRemove(finalSavePath, List.of(name));
-                            log.info("已开启备用RSS, 自动删除 {}/{}", finalSavePath, name);
-                        });
+            for (OpenListTaskStore.Task existing : taskStore.list()) {
+                if (FileUtil.mainName(torrentFile).equals(existing.getHash())) {
+                    log.info("OpenList 任务已存在: {}", reName);
+                    return true;
+                }
             }
-            String tid;
+            Assert.isTrue(openListUtil.mkdir(path), "OpenList 创建暂存目录失败: {}", path);
+
             try {
                 tid = openListUtil.fsAddOfflineDownload(magnet, path, CONFIG.getProvider());
                 log.info("添加离线下载成功 {}", reName);
@@ -110,31 +127,36 @@ public class OpenList implements BaseDownload {
                 log.error("添加离线下载失败 {}", reName);
                 throw new IllegalStateException("添加离线下载失败 " + reName);
             }
+            taskStore.submitted(new OpenListTaskStore.Task()
+                    .setId(tid).setHash(FileUtil.mainName(torrentFile))
+                    .setName(reName).setSavePath(savePath).setStagingPath(path)
+                    .setTags(new ArrayList<>(newTags(ani, item))));
 
             // 记录开始时间
-            DateTime startTime = DateTime.now();
+            long deadline = System.currentTimeMillis()
+                    + Math.max(1, CONFIG.getOpenListDownloadTimeout()) * 60_000L;
 
             // 重试次数
             long retry = 0;
             while (true) {
-                Integer openListDownloadTimeout = CONFIG.getOpenListDownloadTimeout();
                 Long openListDownloadRetryNumber = CONFIG.getOpenListDownloadRetryNumber();
 
-                DateTime endTime = DateUtil.offsetMinute(startTime, openListDownloadTimeout);
-                DateTime currentTime = DateTime.now();
-                if (currentTime.getTime() >= endTime.getTime()) {
+                if (System.currentTimeMillis() >= deadline) {
                     // 超过下载超时限制
-                    log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, openListDownloadTimeout);
+                    log.error("{} {} 分钟还未下载完成, 停止检测下载", reName, CONFIG.getOpenListDownloadTimeout());
+                    taskStore.failed(tid, "下载超时");
                     return false;
                 }
 
                 Optional<OpenListTaskInfo> taskInfoOpt = openListUtil.taskInfo(tid);
 
                 if (taskInfoOpt.isEmpty()) {
+                    ThreadUtil.sleep(2000);
                     continue;
                 }
 
                 OpenListTaskInfo taskInfo = taskInfoOpt.get();
+                taskStore.progress(tid, taskInfo);
                 OpenListTaskInfo.State state = taskInfo.getState();
                 String error = taskInfo.getError();
 
@@ -160,12 +182,14 @@ public class OpenList implements BaseDownload {
                                 break;
                             }
                             log.error("离线下载失败 {}", error);
+                            taskStore.failed(tid, error);
                             return false;
                         }
                         retry++;
                         log.info("离线任务正在进行重试 {}, 当前重试次数 {}, 最大重试次数 {}", tid, retry, openListDownloadRetryNumber);
                     }
-                    openListUtil.taskRetry(tid);
+                    Assert.isTrue(openListUtil.taskRetry(tid), "OpenList 重试失败: {}", tid);
+                    ThreadUtil.sleep(2000);
                     continue;
                 }
 
@@ -176,6 +200,7 @@ public class OpenList implements BaseDownload {
                         ).contains(state)
                 ) {
                     log.error("离线任务已被取消 {}", reName);
+                    taskStore.failed(tid, "任务已取消");
                     return false;
                 }
 
@@ -183,13 +208,38 @@ public class OpenList implements BaseDownload {
                 if (state == OpenListTaskInfo.State.Succeeded) {
                     break;
                 }
+                ThreadUtil.sleep(2000);
             }
 
-            if (delete) {
-                log.info("离线下载完成, 自动删除已完成任务");
-                openListUtil.taskDelete(tid);
+            return finishTask(tid, deadline);
+        } catch (Exception e) {
+            if (tid != null) {
+                taskStore.failed(tid, e.getMessage());
             }
+            log.error(e.getMessage(), e);
+        }
+        return false;
+    }
 
+    private synchronized Boolean finishTask(String tid, long deadline) {
+        OpenListTaskStore.Task task = taskStore.get(tid);
+        if (task == null) {
+            return false;
+        }
+        if (task.isCompleted()) {
+            return true;
+        }
+        String savePath = task.getSavePath();
+        String path = task.getStagingPath();
+        String reName = task.getName();
+        if (!task.getFiles().isEmpty()) {
+            Set<String> present = new HashSet<>(openListUtil.fsListChecked(savePath, true)
+                    .stream().map(OpenListFileInfo::getName).toList());
+            if (present.containsAll(task.getFiles())) {
+                taskStore.completed(tid, task.getFiles(), task.getSize());
+                return true;
+            }
+        }
             List<OpenListFileInfo> openListFileInfos = openListUtil.findFiles(path);
 
             // 取大小最大的一个视频文件
@@ -207,80 +257,108 @@ public class OpenList implements BaseDownload {
                             FileUtils.isSubtitleFormat(openListFileInfo.getName()))
                     .toList();
 
-            Map<String, String> renameMap = new HashMap<>();
-            renameMap.put(videoFile.getName(), reName + "." + FileUtil.extName(videoFile.getName()));
-            for (OpenListFileInfo openListFileInfo : subtitleList) {
-                String name = openListFileInfo.getName();
-                String extName = FileUtil.extName(name);
-                String newName = reName;
-                String lang = FileUtil.extName(FileUtil.mainName(name));
-                if (StrUtil.isNotBlank(lang)) {
-                    newName = newName + "." + lang;
+            List<OpenListFileInfo> selected = new ArrayList<>();
+            selected.add(videoFile);
+            selected.addAll(subtitleList);
+            Set<String> existing = new HashSet<>(openListUtil.fsListChecked(savePath, true)
+                    .stream().map(OpenListFileInfo::getName).toList());
+            Map<String, List<String>> moves = new LinkedHashMap<>();
+            List<String> names = new ArrayList<>();
+            long size = 0;
+            for (OpenListFileInfo file : selected) {
+                String newName = CONFIG.getRename()
+                        ? getFileReName(file.getName(), reName) : file.getName();
+                Assert.isFalse(existing.contains(newName) || names.contains(newName),
+                        "OpenList 目标文件已存在: {}", newName);
+                if (!file.getName().equals(newName)) {
+                    Assert.isTrue(openListUtil.fsBatchRename(List.of(Map.of(
+                            "src_name", file.getName(), "new_name", newName)), file.getPath()),
+                            "OpenList 重命名失败: {}", file.getName());
                 }
-                renameMap.put(name, newName + "." + extName);
+                moves.computeIfAbsent(file.getPath(), ignored -> new ArrayList<>()).add(newName);
+                names.add(newName);
+                size += file.getSize() == null ? 0 : file.getSize();
             }
-
-            Boolean rename = CONFIG.getRename();
-
-            if (rename) {
-                // 重命名
-                List<Map<String, String>> renameObjects = renameMap.entrySet().stream()
-                        .map(map -> {
-                            String srcName = map.getKey();
-                            String newName = map.getValue();
-                            log.info("重命名 {} ==> {}", srcName, newName);
-                            return Map.of(
-                                    "src_name", srcName,
-                                    "new_name", newName
-                            );
-                        }).toList();
-                openListUtil.fsBatchRename(renameObjects, videoFile.getPath());
+            taskStore.planned(tid, names, size);
+            for (Map.Entry<String, List<String>> move : moves.entrySet()) {
+                openListUtil.fsMoveAndWait(move.getKey(), savePath, move.getValue(), deadline);
             }
-
-            // 移动
-            List<String> names = renameMap.entrySet()
-                    .stream()
-                    .map(m -> rename ? m.getValue() : m.getKey())
-                    .toList();
-            openListUtil.fsMove(videoFile.getPath(), savePath, names);
-
-            // 删除残留文件夹
-            openListUtil.fsRemove(savePath, List.of(reName));
-
-            NotificationUtil.send(CONFIG, ani,
-                    StrFormatter.format("{} 下载完成", item.getReName()),
-                    NotificationStatusEnum.DOWNLOAD_END
-            );
-            return true;
-        } catch (Exception e) {
-            log.error(e.getMessage(), e);
-        }
-        return false;
+            while (System.currentTimeMillis() < deadline) {
+                Set<String> present = new HashSet<>(openListUtil.fsListChecked(savePath, true)
+                        .stream().map(OpenListFileInfo::getName).toList());
+                if (present.containsAll(names)) {
+                    taskStore.completed(tid, names, size);
+                    if (openListUtil.findFiles(path).isEmpty()) {
+                        openListUtil.fsRemove(savePath, List.of(path.substring(savePath.length() + 1)));
+                    }
+                    return true;
+                }
+                ThreadUtil.sleep(2000);
+            }
+            throw new IllegalStateException("OpenList 移动后未能确认文件: " + names);
     }
 
     @Override
     public Boolean delete(TorrentsInfo torrentsInfo, Boolean deleteFiles) {
-        return false;
+        OpenListTaskStore.Task task = taskStore.get(torrentsInfo.getId());
+        if (task == null) {
+            return false;
+        }
+        if (deleteFiles && !task.getFiles().isEmpty()
+                && !openListUtil.fsRemove(task.getSavePath(), task.getFiles())) {
+            return false;
+        }
+        if (!openListUtil.taskDelete(task.getId())) {
+            return false;
+        }
+        taskStore.remove(task.getId());
+        return true;
     }
 
     @Override
     public Boolean rename(TorrentsInfo torrentsInfo) {
-        return false;
+        OpenListTaskStore.Task task = taskStore.get(torrentsInfo.getId());
+        return task != null && task.isCompleted();
     }
 
     @Override
     public Boolean addTags(TorrentsInfo torrentsInfo, String tags) {
-        return false;
+        OpenListTaskStore.Task task = taskStore.get(torrentsInfo.getId());
+        if (task == null || StrUtil.isBlank(tags)) {
+            return false;
+        }
+        boolean added = false;
+        for (String tag : tags.split(",")) {
+            if (StrUtil.isNotBlank(tag)) {
+                added |= taskStore.addTag(task.getId(), tag.trim());
+            }
+        }
+        return added;
     }
 
     @Override
     public void updateTrackers(Set<String> trackers) {
-
+        // The OpenList provider owns the transfer and exposes no global tracker setting.
+        if (!trackers.isEmpty()) {
+            log.debug("OpenList Driver 不支持全局 Tracker 配置");
+        }
     }
 
     @Override
     public void setSavePath(TorrentsInfo torrentsInfo, String path) {
-
+        OpenListTaskStore.Task task = taskStore.get(torrentsInfo.getId());
+        if (task == null || !task.isCompleted()) {
+            throw new IllegalStateException("OpenList 任务尚未完成，无法移动: " + torrentsInfo.getName());
+        }
+        path = ReUtil.replaceAll(path, "^[A-Za-z]:", "").replace('\\', '/');
+        if (path.equals(task.getSavePath())) {
+            return;
+        }
+        Assert.isTrue(openListUtil.mkdir(path), "OpenList 创建目标目录失败: {}", path);
+        long deadline = System.currentTimeMillis()
+                + Math.max(1, CONFIG.getOpenListDownloadTimeout()) * 60_000L;
+        openListUtil.fsMoveAndWait(task.getSavePath(), path, task.getFiles(), deadline);
+        taskStore.moved(task.getId(), path);
     }
 
 

@@ -7,9 +7,8 @@ import ani.rss.entity.OpenListTaskInfo;
 import ani.rss.entity.web.Header;
 import ani.rss.util.basic.HttpReq;
 import cn.hutool.core.collection.ListUtil;
-import cn.hutool.core.lang.Assert;
-import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.core.util.ObjectUtil;
+import cn.hutool.core.thread.ThreadUtil;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.http.HttpResponse;
 import com.google.gson.JsonArray;
@@ -38,7 +37,7 @@ public class OpenListUtil {
 
     public Boolean test() {
         return postApi("me")
-                .thenFunction(HttpResponse::isOk);
+                .thenFunction(res -> success(res, "me"));
     }
 
     /**
@@ -46,20 +45,17 @@ public class OpenListUtil {
      *
      * @param path 路径
      */
-    public void mkdir(String path) {
-        postApi("fs/mkdir")
+    public boolean mkdir(String path) {
+        return postApi("fs/mkdir")
                 .body(GsonStatic.toJson(Map.of(
                         "path", path
                 )))
-                .then(res -> {
-                    JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                    int code = jsonObject.get("code").getAsInt();
-                    String message = jsonObject.get("message").getAsString();
-                    if (code == 200) {
+                .thenFunction(res -> {
+                    if (success(res, "fs/mkdir")) {
                         log.info("创建文件夹: {}", path);
-                        return;
+                        return true;
                     }
-                    log.error(message);
+                    return false;
                 });
     }
 
@@ -70,14 +66,55 @@ public class OpenListUtil {
      * @param dstDir 目标目录
      * @param names  文件名
      */
-    public void fsMove(String srcDir, String dstDir, List<String> names) {
-        postApi("fs/move")
+    public boolean fsMove(String srcDir, String dstDir, List<String> names) {
+        return postApi("fs/move")
                 .body(GsonStatic.toJson(Map.of(
                         "src_dir", srcDir,
                         "dst_dir", dstDir,
                         "names", names
                 )))
-                .then(res -> log.info(res.body()));
+                .thenFunction(res -> success(res, "fs/move"));
+    }
+
+    /** OpenList 4.2.x may return background move tasks; wait for those tasks to finish. */
+    public void fsMoveAndWait(String srcDir, String dstDir, List<String> names, long deadline) {
+        List<String> ids = postApi("fs/move")
+                .body(GsonStatic.toJson(Map.of(
+                        "src_dir", srcDir,
+                        "dst_dir", dstDir,
+                        "names", names
+                )))
+                .thenFunction(res -> {
+                    requireSuccess(res, "fs/move");
+                    JsonObject body = GsonStatic.fromJson(res.body(), JsonObject.class);
+                    JsonObject data = body.getAsJsonObject("data");
+                    if (data == null || !data.has("tasks") || data.get("tasks").isJsonNull()) {
+                        return List.<String>of();
+                    }
+                    List<String> result = new ArrayList<>();
+                    for (JsonElement element : data.getAsJsonArray("tasks")) {
+                        result.add(element.getAsJsonObject().get("id").getAsString());
+                    }
+                    return result;
+                });
+        for (String id : ids) {
+            while (System.currentTimeMillis() < deadline) {
+                OpenListTaskInfo info = taskInfo("move", id).orElseThrow(
+                        () -> new IllegalStateException("OpenList move task disappeared: " + id));
+                if (info.getState() == OpenListTaskInfo.State.Succeeded) {
+                    break;
+                }
+                if (List.of(OpenListTaskInfo.State.Error, OpenListTaskInfo.State.Failing,
+                        OpenListTaskInfo.State.Failed, OpenListTaskInfo.State.Canceled)
+                        .contains(info.getState())) {
+                    throw new IllegalStateException("OpenList move failed: " + info.getError());
+                }
+                ThreadUtil.sleep(1000);
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw new IllegalStateException("OpenList move timed out: " + id);
+            }
+        }
     }
 
     /**
@@ -86,13 +123,13 @@ public class OpenListUtil {
      * @param dir   目录
      * @param names 文件名
      */
-    public void fsRemove(String dir, List<String> names) {
-        postApi("fs/remove")
+    public boolean fsRemove(String dir, List<String> names) {
+        return postApi("fs/remove")
                 .body(GsonStatic.toJson(Map.of(
                         "dir", dir,
                         "names", names
                 )))
-                .then(HttpResponse::isOk);
+                .thenFunction(res -> success(res, "fs/remove"));
     }
 
     /**
@@ -101,13 +138,13 @@ public class OpenListUtil {
      * @param mapList 重命名列表
      * @param srcDir  目录
      */
-    public void fsBatchRename(List<Map<String, String>> mapList, String srcDir) {
-        postApi("fs/batch_rename")
+    public boolean fsBatchRename(List<Map<String, String>> mapList, String srcDir) {
+        return postApi("fs/batch_rename")
                 .body(GsonStatic.toJson(Map.of(
                         "src_dir", srcDir,
                         "rename_objects", mapList
                 )))
-                .then(res -> log.info(res.body()));
+                .thenFunction(res -> success(res, "fs/batch_rename"));
     }
 
     /**
@@ -126,10 +163,9 @@ public class OpenListUtil {
                         "delete_policy", "delete_on_upload_succeed"
                 )))
                 .thenFunction(res -> {
-                    HttpReq.assertStatus(res);
+                    requireSuccess(res, "fs/add_offline_download");
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                     log.debug(jsonObject.toString());
-                    Assert.isTrue(jsonObject.get("code").getAsInt() == 200);
                     return jsonObject.getAsJsonObject("data")
                             .getAsJsonArray("tasks")
                             .get(0).getAsJsonObject()
@@ -145,7 +181,16 @@ public class OpenListUtil {
      */
     public List<OpenListFileInfo> fsList(String path, Boolean refresh) {
         try {
-            return postApi("fs/list")
+            return fsListChecked(path, refresh);
+        } catch (Exception e) {
+            log.error(e.getMessage(), e);
+        }
+        return List.of();
+    }
+
+    /** Unlike fsList, an API failure must not look like an empty directory. */
+    public List<OpenListFileInfo> fsListChecked(String path, Boolean refresh) {
+        return postApi("fs/list")
                     .body(GsonStatic.toJson(Map.of(
                             "path", path,
                             "page", 1,
@@ -153,11 +198,8 @@ public class OpenListUtil {
                             "refresh", refresh
                     )))
                     .thenFunction(res -> {
+                        requireSuccess(res, "fs/list");
                         JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        int code = jsonObject.get("code").getAsInt();
-                        if (code != 200) {
-                            return List.of();
-                        }
                         JsonElement data = jsonObject.get("data");
                         if (Objects.isNull(data) || data.isJsonNull()) {
                             return List.of();
@@ -176,10 +218,6 @@ public class OpenListUtil {
                             return Long.MAX_VALUE - ObjectUtil.defaultIfNull(size, 0L);
                         }));
                     });
-        } catch (Exception e) {
-            log.error(e.getMessage(), e);
-        }
-        return List.of();
     }
 
     /**
@@ -189,14 +227,23 @@ public class OpenListUtil {
      * @return 任务信息
      */
     public Optional<OpenListTaskInfo> taskInfo(String tid) {
+        return taskInfo("offline_download", tid);
+    }
+
+    public Optional<OpenListTaskInfo> taskInfo(String type, String tid) {
         try {
-            OpenListTaskInfo taskInfo = postApi("task/offline_download/info?tid=" + tid)
+            OpenListTaskInfo taskInfo = postApi("task/" + type + "/info?tid=" + tid)
                     .thenFunction(res -> {
+                        requireSuccess(res, "task/offline_download/info");
                         JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
-                        JsonObject data = jsonObject.get("data").getAsJsonObject();
+                        JsonElement dataElement = jsonObject.get("data");
+                        if (dataElement == null || dataElement.isJsonNull()) {
+                            return null;
+                        }
+                        JsonObject data = dataElement.getAsJsonObject();
                         return GsonStatic.fromJson(data, OpenListTaskInfo.class);
                     });
-            return Optional.of(taskInfo);
+            return Optional.ofNullable(taskInfo);
         } catch (Exception e) {
             log.error(e.getMessage(), e);
         }
@@ -234,6 +281,7 @@ public class OpenListUtil {
     public List<OpenListTaskInfo> taskUnDoneList() {
         return getApi("task/offline_download/undone")
                 .thenFunction(res -> {
+                    requireSuccess(res, "task/offline_download/undone");
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                     JsonArray jsonArray = jsonObject.get("data").getAsJsonArray();
                     return GsonStatic.fromJsonList(jsonArray, OpenListTaskInfo.class);
@@ -248,6 +296,7 @@ public class OpenListUtil {
     public List<OpenListTaskInfo> taskDoneList() {
         return getApi("task/offline_download/done")
                 .thenFunction(res -> {
+                    requireSuccess(res, "task/offline_download/done");
                     JsonObject jsonObject = GsonStatic.fromJson(res.body(), JsonObject.class);
                     JsonArray jsonArray = jsonObject.get("data").getAsJsonArray();
                     return GsonStatic.fromJsonList(jsonArray, OpenListTaskInfo.class);
@@ -259,10 +308,9 @@ public class OpenListUtil {
      *
      * @param tid 任务id
      */
-    public void taskRetry(String tid) {
-        postApi("task/offline_download/retry")
-                .form("tid", tid)
-                .thenFunction(HttpResponse::isOk);
+    public boolean taskRetry(String tid) {
+        return postApi("task/offline_download/retry?tid=" + tid)
+                .thenFunction(res -> success(res, "task/offline_download/retry"));
     }
 
     /**
@@ -270,10 +318,17 @@ public class OpenListUtil {
      *
      * @param tid 任务id
      */
-    public void taskDelete(String tid) {
-        postApi("task/offline_download/delete_some")
+    public boolean taskDelete(String tid) {
+        return postApi("task/offline_download/delete_some")
                 .body(GsonStatic.toJson(List.of(tid)))
-                .thenFunction(HttpResponse::isOk);
+                .thenFunction(res -> {
+                    if (!success(res, "task/offline_download/delete_some")) {
+                        return false;
+                    }
+                    JsonObject data = GsonStatic.fromJson(res.body(), JsonObject.class)
+                            .getAsJsonObject("data");
+                    return data == null || !data.has(tid);
+                });
     }
 
     /**
@@ -283,7 +338,7 @@ public class OpenListUtil {
      * @return 文件列表
      */
     public List<OpenListFileInfo> findFiles(String path) {
-        List<OpenListFileInfo> openListFileInfos = fsList(path, true);
+        List<OpenListFileInfo> openListFileInfos = fsListChecked(path, true);
         List<OpenListFileInfo> list = openListFileInfos.stream()
                 .flatMap(openListFileInfo -> {
                     if (openListFileInfo.getIsDir()) {
@@ -305,7 +360,6 @@ public class OpenListUtil {
      * @return HttpRequest
      */
     public HttpRequest getApi(String action) {
-        ThreadUtil.sleep(2000);
         String server = openListConfig.getServer();
         String apiKey = openListConfig.getApiKey();
         return HttpReq.get(server + "/api/" + action)
@@ -319,10 +373,29 @@ public class OpenListUtil {
      * @return HttpRequest
      */
     public HttpRequest postApi(String action) {
-        ThreadUtil.sleep(2000);
         String server = openListConfig.getServer();
         String apiKey = openListConfig.getApiKey();
         return HttpReq.post(server + "/api/" + action)
                 .header(Header.AUTHORIZATION, apiKey);
+    }
+
+    private static boolean success(HttpResponse response, String operation) {
+        try {
+            requireSuccess(response, operation);
+            return true;
+        } catch (RuntimeException error) {
+            log.warn("OpenList {} failed: {}", operation, error.getMessage());
+            return false;
+        }
+    }
+
+    private static void requireSuccess(HttpResponse response, String operation) {
+        HttpReq.assertStatus(response);
+        JsonObject body = GsonStatic.fromJson(response.body(), JsonObject.class);
+        if (body == null || !body.has("code") || body.get("code").getAsInt() != 200) {
+            String message = body != null && body.has("message")
+                    ? body.get("message").getAsString() : "missing API success code";
+            throw new IllegalStateException("OpenList " + operation + ": " + message);
+        }
     }
 }

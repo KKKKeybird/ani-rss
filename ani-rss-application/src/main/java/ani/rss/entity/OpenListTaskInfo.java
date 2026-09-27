@@ -29,7 +29,7 @@ public class OpenListTaskInfo implements Serializable {
     private String status;
 
     @Schema(description = "进度")
-    private Integer progress;
+    private Double progress;
 
     @Schema(description = "开始时间")
     @SerializedName(value = "startTime", alternate = "start_time")
@@ -41,7 +41,7 @@ public class OpenListTaskInfo implements Serializable {
 
     @Schema(description = "字节数")
     @SerializedName(value = "totalBytes", alternate = "total_bytes")
-    private String totalBytes;
+    private Long totalBytes;
 
     @Schema(description = "错误信息")
     private String error;
