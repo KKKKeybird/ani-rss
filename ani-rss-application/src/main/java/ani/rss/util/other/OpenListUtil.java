@@ -313,6 +313,11 @@ public class OpenListUtil {
                 .thenFunction(res -> success(res, "task/offline_download/retry"));
     }
 
+    public boolean taskCancel(String tid) {
+        return postApi("task/offline_download/cancel?tid=" + tid)
+                .thenFunction(res -> success(res, "task/offline_download/cancel"));
+    }
+
     /**
      * 删除任务
      *

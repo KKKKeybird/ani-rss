@@ -1,6 +1,6 @@
 # Ani-RSS 与 OpenList 的兼容路线评估
 
-基线：Ani-RSS `v3.2.38`。本文只评估实现路线，不改变现有下载器或用户数据。
+基线：Ani-RSS `v3.2.38`。本分支开始维护原生 OpenList 下载器；NAS 尚未部署。
 
 ## 结论
 
@@ -25,13 +25,27 @@ Ani-RSS 的 `Aria2` 后端调用 `getGlobalStat`、`addTorrent`、`tellActive`�
 
 `v3.2.38` 已有 `OpenList.java`、`OpenListUtil.java`、OpenList 配置和任务/文件实体。下载流程已经处理提交离线任务、等待状态、重试、云端重命名、移动文件及完成通知。沿用此路线不需要转换既有的 `config.v2.json` 和 `ani.v2.json`。
 
-需要重点维护和验证的部分：
+已在本分支实现：
+
+1. 按 OpenList `v4.2.6` 的 API 修正任务重试的 `tid` 查询参数、浮点进度与 `total_bytes` 整数类型，并检查 JSON 返回码和批量删除的逐项错误。
+2. 将 Ani-RSS 创建的任务 ID、保存路径、标签、进度与输出文件清单持久保存到配置目录的 `cache/openlist-tasks.json`，供任务列表、完成通知、删除与路径调整使用。该文件只记录本分支创建的任务，不会导入 OpenList 中其他任务。
+3. 下载轮询增加间隔。离线任务成功后等待文件出现，调用云端重命名和移动，并等待移动任务及目标文件可见后才标记完成。暂存目录使用独立名称；只在确认没有剩余文件时清理。
+4. 完成标签经任务记录去重，沿用 Ani-RSS 通用完成通知。原先按文件名模糊匹配并删除备用 RSS 文件的逻辑已移除，改由通用任务清理流程处理。
+
+尚需验证：
+
+1. 用非生产 OpenList 实例及所选 Driver 做端到端下载、字幕、移动、删除测试。不同 Driver 的离线完成与云端转存时序可能不同。
+2. 在重命名或多文件移动中途进程退出时，会根据预期文件清单继续处理暂存目录中剩余文件；这一恢复流程仍需真实 OpenList 环境验证。
+3. OpenList 没有 qBittorrent 的做种比率、上传速度、全局 Tracker 等通用 API。这些选项由具体 Driver 决定，不能在此后端等价实现。
+
+后续维护重点：
 
 1. 保留下载器选择入口及相关配置字段，避免合并上游改动时把 OpenList 实现或 UI 选项删掉。
-2. 给任务状态轮询设置间隔或退避；当前 `while (true)` 在任务信息为空等路径可能密集请求。
-3. 区分提交成功、任务成功、文件实际可见、重命名与移动成功；失败时保留可诊断信息，并避免重复通知或重复下载。
-4. 针对 OpenList API 的成功、失败、取消、任务暂不可见及文件延迟可见编写隔离测试，再用非生产数据做一次端到端验证。
-5. 为自建镜像使用固定版本或摘要，并在合并上游版本时运行兼容检查。上游移除 OpenList 后，后续合并可能产生冲突，需要由本分支维护。
+2. 为自建镜像使用固定版本或摘要，并在合并上游版本时运行兼容检查。上游移除 OpenList 后，后续合并可能产生冲突，需要由本分支维护。
+
+## OpenList API 核对
+
+以官方 [API 文档入口](https://doc.oplist.org/api/apidocs) 和 `v4.2.6` 对应实现为准：[任务接口](https://github.com/OpenListTeam/OpenList/blob/v4.2.6/server/handles/task.go)、[离线下载接口](https://github.com/OpenListTeam/OpenList/blob/v4.2.6/server/handles/offline_download.go)、[文件移动接口](https://github.com/OpenListTeam/OpenList/blob/v4.2.6/server/handles/fsmanage.go)。
 
 ## 源码依据
 
@@ -45,4 +59,4 @@ Ani-RSS 的 `Aria2` 后端调用 `getGlobalStat`、`addTorrent`、`tellActive`�
 - `ani-rss-application/src/main/java/ani/rss/download/OpenList.java`
 - `ani-rss-application/src/main/java/ani/rss/util/other/OpenListUtil.java`
 
-本分支从 `v3.2.38` 建立。当前提交只记录评估，不部署到 NAS。
+本分支从 `v3.2.38` 建立。NAS 仍使用原配置与容器。
