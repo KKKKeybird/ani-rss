@@ -10,6 +10,8 @@
 
 Ani-RSS 的 `Aria2` 后端调用 `getGlobalStat`、`addTorrent`、`tellActive`、`tellWaiting`、`tellStopped`、`removeDownloadResult` 和 `changeGlobalOption`。兼容服务需要把这些方法映射到 OpenList API，并持久保存 Aria2 GID 与 OpenList 任务 ID 的对应关系。查询任务时，还必须构造 Ani-RSS 预期的 `bittorrent.info.name`、`dir`、`files`、`infoHash` 和状态。
 
+下载器选择由 `ConfigService` / `CronConfig` 按 `ani.rss.download.<名称>` 加载 Spring Bean；当前没有可独立安装的下载器插件接口。这里的“插件”实际只能是对外冒充 Aria2 的 RPC 服务。
+
 仅实现 RPC 仍有以下缺口：
 
 1. `Aria2.download()` 拒绝 `.txt` 磁力链接；现有 `OpenList.download()` 会从种子取得磁力链接后提交到 OpenList。
@@ -38,6 +40,8 @@ Ani-RSS 的 `Aria2` 后端调用 `getGlobalStat`、`addTorrent`、`tellActive`�
 - `ani-rss-application/src/main/java/ani/rss/entity/torrent/Aria2TorrentsInfo.java`
 - `ani-rss-application/src/main/java/ani/rss/task/RenameTask.java`
 - `ani-rss-application/src/main/java/ani/rss/service/DownloadService.java`
+- `ani-rss-application/src/main/java/ani/rss/service/ConfigService.java`
+- `ani-rss-application/src/main/java/ani/rss/config/CronConfig.java`
 - `ani-rss-application/src/main/java/ani/rss/download/OpenList.java`
 - `ani-rss-application/src/main/java/ani/rss/util/other/OpenListUtil.java`
 
