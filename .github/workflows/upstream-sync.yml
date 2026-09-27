@@ -1,0 +1,131 @@
+name: Follow upstream releases
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: vars.UPSTREAM_SYNC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Find next stable upstream release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr list --state open --label upstream-sync --json number --jq 'length' | grep -qv '^0$'; then
+            echo 'An upstream sync PR is already open; process releases in order.'
+            exit 0
+          fi
+          python3 .github/scripts/next_upstream_release.py \
+            --repo wushuo894/ani-rss \
+            --marker .github/upstream-release.txt \
+            --output "$GITHUB_OUTPUT"
+      - name: Merge upstream release into a sync branch
+        if: steps.release.outputs.tag != ''
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SYNC_BRANCH: ${{ steps.release.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --no-tags https://github.com/wushuo894/ani-rss.git \
+            "refs/tags/${RELEASE_TAG}:refs/upstream-releases/${RELEASE_TAG}"
+          git switch -c "$SYNC_BRANCH"
+          if ! git merge --no-ff --no-edit "refs/upstream-releases/${RELEASE_TAG}"; then
+            git merge --abort
+            title="[upstream-sync] ${RELEASE_TAG} needs conflict resolution"
+            if ! gh issue list --state open --search "$title in:title" --json title --jq '.[].title' | grep -Fxq "$title"; then
+              gh issue create --title "$title" --body "Automatic merge of upstream ${RELEASE_TAG} conflicted. Merge it into a branch based on fork main, preserve the OpenList downloader, and update .github/upstream-release.txt before merging. Upstream release: https://github.com/wushuo894/ani-rss/releases/tag/${RELEASE_TAG}"
+            fi
+            exit 1
+          fi
+          printf '%s\n' "$RELEASE_TAG" > .github/upstream-release.txt
+          git add .github/upstream-release.txt
+          git commit -m "Track upstream ${RELEASE_TAG} release"
+          git push origin "HEAD:refs/heads/${SYNC_BRANCH}"
+          echo "branch=${SYNC_BRANCH}" >> "$GITHUB_OUTPUT"
+      - name: Open PR, request Copilot review, and run verification
+        if: steps.merge.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SYNC_BRANCH: ${{ steps.merge.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh label create upstream-sync --color 0969da --description 'Upstream release synchronization' --force
+          pr_url=$(gh pr create --base main --head "$SYNC_BRANCH" \
+            --title "Sync upstream ${RELEASE_TAG}" \
+            --body "Upstream release: https://github.com/wushuo894/ani-rss/releases/tag/${RELEASE_TAG}
+
+          This PR merges the upstream release into the OpenList fork. Copilot must approve the result, and upstream verification must pass before automatic merge. Review changes to the native OpenList downloader carefully." \
+            --label upstream-sync)
+          pr_number=${pr_url##*/}
+          gh workflow run upstream-verify.yml --ref "$SYNC_BRANCH"
+          if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/requested_reviewers" \
+            -f 'reviewers[]=copilot-pull-request-reviewer[bot]'; then
+            echo "Copilot review request failed for PR #${pr_number}; automatic merge remains blocked" >&2
+          fi
+          echo "Opened $pr_url"
+
+  merge-reviewed:
+    needs: sync
+    if: always() && vars.UPSTREAM_SYNC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Merge approved and verified sync PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --label upstream-sync \
+            --json number,headRefName --jq '.[] | [.number,.headRefName] | @tsv' |
+          while IFS=$'\t' read -r number branch; do
+            [ -n "$number" ] || continue
+            head_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')
+            base_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.base.sha')
+            gh api "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
+              --jq '.merge_base_commit.sha' | grep -Fxq "$base_sha" || {
+                echo "PR #${number}: base moved; manual branch refresh required"
+                continue
+              }
+            conclusion=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow upstream-verify.yml --branch "$branch" --limit 30 \
+              --json headSha,status,conclusion,createdAt \
+              --jq "[.[] | select(.headSha == \"${head_sha}\")] | sort_by(.createdAt) | last | .conclusion // empty")
+            if [ "$conclusion" != success ]; then
+              echo "PR #${number}: verification is ${conclusion:-pending}"
+              continue
+            fi
+            review=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
+              --jq ".[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"${head_sha}\") | .state" | tail -1)
+            if [ "$review" != APPROVED ]; then
+              echo "PR #${number}: Copilot review is ${review:-pending}; not merging"
+              continue
+            fi
+            gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
+            gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref main
+            echo "Merged PR #${number} and dispatched fork release build"
+          done
