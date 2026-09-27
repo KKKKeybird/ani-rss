@@ -54,18 +54,31 @@ public class OpenListTaskStore {
         if (task == null || task.isCompleted() || info == null) {
             return;
         }
+        boolean changed = false;
         Double progress = info.getProgress();
         if (progress != null) {
-            task.setProgress((int) Math.clamp(progress, 0, 99));
+            int value = (int) Math.clamp(progress, 0, 99);
+            if (task.getProgress() != value) {
+                task.setProgress(value);
+                changed = true;
+            }
         }
-        if (info.getTotalBytes() != null) {
+        if (info.getTotalBytes() != null && task.getSize() != info.getTotalBytes()) {
             task.setSize(info.getTotalBytes());
+            changed = true;
         }
         OpenListTaskInfo.State state = info.getState();
-        if (state != null) {
+        if (state != null && !state.name().equals(task.getState())) {
             task.setState(state.name());
+            changed = true;
         }
-        save();
+        if (!Objects.equals(task.getError(), info.getError())) {
+            task.setError(info.getError());
+            changed = true;
+        }
+        if (changed) {
+            save();
+        }
     }
 
     public synchronized void completed(String id, List<String> files, long size) {
