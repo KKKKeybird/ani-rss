@@ -1,0 +1,55 @@
+name: Temporary v3.2.39 review flow smoke test
+on:
+  push:
+    branches: [fix/upstream-review-gate-v3.2.39]
+permissions:
+  contents: write
+  pull-requests: write
+  issues: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Request Copilot as GitHub Actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr_id=$(gh pr view 4 --json id --jq '.id')
+          gh api graphql -F prId="$pr_id" \
+            -f query='mutation($prId: ID!) {
+              requestReviewsByLogin(input: {
+                pullRequestId: $prId,
+                botLogins: ["copilot-pull-request-reviewer"]
+              }) { pullRequest { number } }
+            }' --jq '.data.requestReviewsByLogin.pullRequest.number' |
+            grep -Fx 4
+          for attempt in {1..12}; do
+            if gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/4/events?per_page=100" \
+              --jq '.[] | select(.event == "copilot_work_started" or
+                (.event == "review_requested" and .requested_reviewer.login == "Copilot")) | .id' |
+              grep -q .; then
+              echo 'Copilot review event observed'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'No Copilot review event within 60 seconds' >&2
+          exit 1
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: OpenList regression tests
+        run: mvn -B -pl ani-rss-application -am -Dtest=OpenListTaskStoreTest,OpenListUtilTest -Dsurefire.failIfNoSpecifiedTests=false test
+      - name: Build v3.2.39 artifacts without publishing
+        run: bash ./package.sh
+      - name: Close temporary PR and delete test branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr close 4 --repo "$GITHUB_REPOSITORY" || true
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/fix/upstream-review-gate-v3.2.39"
