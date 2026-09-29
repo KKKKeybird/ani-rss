@@ -40,7 +40,8 @@ jobs:
           name: ANI-RSS OpenList ${{ env.release_tag }}
           tag_name: ${{ env.release_tag }}
           target_commitish: ${{ github.sha }}
-          prerelease: true
+          prerelease: false
+          make_latest: true
           body: |
             社区维护的 ANI-RSS OpenList fork，基于上游代码维护原生 OpenList 下载器。
 
