@@ -4,6 +4,13 @@ on:
   schedule:
     - cron: '17 */6 * * *'
   workflow_dispatch:
+  workflow_run:
+    workflows: [Upstream sync verification]
+    types: [completed]
+  pull_request_review:
+    types: [submitted]
+  pull_request_target:
+    types: [closed]
 
 permissions:
   contents: write
@@ -17,7 +24,7 @@ concurrency:
 
 jobs:
   sync:
-    if: vars.UPSTREAM_SYNC_ENABLED == 'true'
+    if: vars.UPSTREAM_SYNC_ENABLED == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -80,15 +87,38 @@ jobs:
             --label upstream-sync)
           pr_number=${pr_url##*/}
           gh workflow run upstream-verify.yml --ref "$SYNC_BRANCH"
-          if ! gh api -X POST "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/requested_reviewers" \
-            -f 'reviewers[]=copilot-pull-request-reviewer[bot]'; then
-            echo "Copilot review request failed for PR #${pr_number}; automatic merge remains blocked" >&2
+          pr_id=$(gh pr view "$pr_number" --json id --jq '.id')
+          requested=$(gh api graphql -F prId="$pr_id" \
+            -f query='mutation($prId: ID!) {
+              requestReviewsByLogin(input: {
+                pullRequestId: $prId,
+                botLogins: ["copilot-pull-request-reviewer"]
+              }) { pullRequest { number } }
+            }' --jq '.data.requestReviewsByLogin.pullRequest.number')
+          if [ "$requested" != "$pr_number" ]; then
+            echo "Copilot review request was not accepted for PR #${pr_number}" >&2
+            exit 1
           fi
+          # An HTTP success alone did not start Copilot on PR #2.
+          for attempt in {1..12}; do
+            if gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/events?per_page=100" \
+              --jq '.[] | select(.event == "copilot_work_started" or
+                (.event == "review_requested" and .requested_reviewer.login == "Copilot")) | .id' |
+              grep -q .; then
+              echo "Copilot review started for PR #${pr_number}"
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              echo "Copilot did not start reviewing PR #${pr_number}; leave it open" >&2
+              exit 1
+            fi
+            sleep 5
+          done
           echo "Opened $pr_url"
 
   merge-reviewed:
     needs: sync
-    if: always() && vars.UPSTREAM_SYNC_ENABLED == 'true'
+    if: always() && vars.UPSTREAM_SYNC_ENABLED == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' || github.event_name == 'pull_request_review')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,6 +134,7 @@ jobs:
             --json number,headRefName --jq '.[] | [.number,.headRefName] | @tsv' |
           while IFS=$'\t' read -r number branch; do
             [ -n "$number" ] || continue
+            case "$branch" in sync/upstream-*) ;; *) continue ;; esac
             head_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.head.sha')
             base_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.base.sha')
             gh api "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
@@ -111,12 +142,12 @@ jobs:
                 echo "PR #${number}: base moved; manual branch refresh required"
                 continue
               }
-            conclusion=$(gh run list --repo "$GITHUB_REPOSITORY" \
-              --workflow upstream-verify.yml --branch "$branch" --limit 30 \
-              --json headSha,status,conclusion,createdAt \
-              --jq "[.[] | select(.headSha == \"${head_sha}\")] | sort_by(.createdAt) | last | .conclusion // empty")
-            if [ "$conclusion" != success ]; then
-              echo "PR #${number}: verification is ${conclusion:-pending}"
+            verified=$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow upstream-verify.yml --event workflow_dispatch --branch "$branch" --limit 100 \
+              --json headSha,status,conclusion \
+              --jq "any(.[]; .headSha == \"${head_sha}\" and .status == \"completed\" and .conclusion == \"success\")")
+            if [ "$verified" != true ]; then
+              echo "PR #${number}: dispatch verification has not passed"
               continue
             fi
             review=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
@@ -133,4 +164,29 @@ jobs:
             gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
             gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref main
             echo "Merged PR #${number} and dispatched fork release build"
+          done
+
+  cleanup-merged-branch:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Delete merged sync branches that still point to their PR heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=closed&per_page=100" \
+            --jq '.[] | select(.merged_at != null and
+              any(.labels[]; .name == "upstream-sync")) |
+              [.number, .head.ref, .head.sha, .head.repo.full_name] | @tsv' |
+          while IFS=$'\t' read -r number branch head_sha head_repo; do
+            [ "$head_repo" = "$GITHUB_REPOSITORY" ] || continue
+            case "$branch" in sync/upstream-*) ;; *) continue ;; esac
+            current_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha' 2>/dev/null) || continue
+            [ "$current_sha" = "$head_sha" ] || continue
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"
+            echo "Deleted merged PR #${number} branch ${branch}"
           done
