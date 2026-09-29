@@ -7,8 +7,6 @@ on:
   workflow_run:
     workflows: [Upstream sync verification]
     types: [completed]
-  pull_request_review:
-    types: [submitted]
   pull_request_target:
     types: [closed]
 
@@ -70,7 +68,7 @@ jobs:
           git commit -m "Track upstream ${RELEASE_TAG} release"
           git push origin "HEAD:refs/heads/${SYNC_BRANCH}"
           echo "branch=${SYNC_BRANCH}" >> "$GITHUB_OUTPUT"
-      - name: Open PR, request Copilot review, and run verification
+      - name: Open PR and run verification
         if: steps.merge.outputs.branch != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,49 +81,21 @@ jobs:
             --title "Sync upstream ${RELEASE_TAG}" \
             --body "Upstream release: https://github.com/wushuo894/ani-rss/releases/tag/${RELEASE_TAG}
 
-          This PR merges the upstream release into the OpenList fork. Copilot must approve the result, and upstream verification must pass before automatic merge. Review changes to the native OpenList downloader carefully." \
+          This PR merges the upstream release into the OpenList fork. It will merge automatically when verification passes, the base is current, and GitHub reports no merge conflicts. Review changes to the native OpenList downloader carefully." \
             --label upstream-sync)
-          pr_number=${pr_url##*/}
           gh workflow run upstream-verify.yml --ref "$SYNC_BRANCH"
-          pr_id=$(gh pr view "$pr_number" --json id --jq '.id')
-          requested=$(gh api graphql -F prId="$pr_id" \
-            -f query='mutation($prId: ID!) {
-              requestReviewsByLogin(input: {
-                pullRequestId: $prId,
-                botLogins: ["copilot-pull-request-reviewer"]
-              }) { pullRequest { number } }
-            }' --jq '.data.requestReviewsByLogin.pullRequest.number')
-          if [ "$requested" != "$pr_number" ]; then
-            echo "Copilot review request was not accepted for PR #${pr_number}" >&2
-            exit 1
-          fi
-          # An HTTP success alone did not start Copilot on PR #2.
-          for attempt in {1..12}; do
-            if gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/events?per_page=100" \
-              --jq '.[] | select(.event == "copilot_work_started" or
-                (.event == "review_requested" and .requested_reviewer.login == "Copilot")) | .id' |
-              grep -q .; then
-              echo "Copilot review started for PR #${pr_number}"
-              break
-            fi
-            if [ "$attempt" -eq 12 ]; then
-              echo "Copilot did not start reviewing PR #${pr_number}; leave it open" >&2
-              exit 1
-            fi
-            sleep 5
-          done
           echo "Opened $pr_url"
 
-  merge-reviewed:
+  merge-verified:
     needs: sync
-    if: always() && vars.UPSTREAM_SYNC_ENABLED == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run' || github.event_name == 'pull_request_review')
+    if: always() && vars.UPSTREAM_SYNC_ENABLED == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_run')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
       actions: write
     steps:
-      - name: Merge approved and verified sync PRs
+      - name: Merge verified sync PRs without conflicts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -150,24 +120,12 @@ jobs:
               echo "PR #${number}: dispatch verification has not passed"
               continue
             fi
-            review=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
-              --jq ".[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"${head_sha}\") | .state" | tail -1)
-            if [ "$review" != APPROVED ]; then
-              if [ "$review" = COMMENTED ] && gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
-                --jq ".[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"${head_sha}\") | .body" |
-                grep -qi 'quota limit'; then
-                echo "::error title=Copilot review unavailable::PR #${number}: Copilot reported a quota limit; check review billing and retry when available"
-                exit 1
-              fi
-              echo "PR #${number}: Copilot review is ${review:-pending}; not merging"
+            mergeable=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}" --jq '.mergeable')
+            if [ "$mergeable" != true ]; then
+              echo "PR #${number}: mergeable is ${mergeable}; not merging"
               continue
             fi
-            if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
-              --jq '.[] | select(.state == "CHANGES_REQUESTED") | .user.login' | grep -q .; then
-              echo "PR #${number}: a reviewer requested changes; not merging"
-              continue
-            fi
-            gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
+            gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --merge --delete-branch --match-head-commit "$head_sha"
             gh workflow run build.yml --repo "$GITHUB_REPOSITORY" --ref main
             echo "Merged PR #${number} and dispatched fork release build"
           done
