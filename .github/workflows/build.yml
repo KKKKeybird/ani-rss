@@ -25,14 +25,12 @@ jobs:
       - name: Verify OpenList compatibility
         run: mvn -B -pl ani-rss-application -am -Dtest=OpenListTaskStoreTest,OpenListUtilTest -Dsurefire.failIfNoSpecifiedTests=false test
       - name: Build release artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           bash ./package.sh
           version=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f pom.xml)
           release_tag="v${version}-openlist"
-          existing_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${release_tag}" --jq '.object.sha' 2>/dev/null || true)
+          existing_sha=$(git ls-remote --tags origin "refs/tags/${release_tag}" | awk 'NR == 1 {print $1}')
           if [ -n "$existing_sha" ] && [ "$existing_sha" != "$GITHUB_SHA" ]; then
             echo "::error::Tag ${release_tag} already points to ${existing_sha}; refusing to replace a release with artifacts from ${GITHUB_SHA}"
             exit 1
