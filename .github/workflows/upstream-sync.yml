@@ -153,6 +153,12 @@ jobs:
             review=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
               --jq ".[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"${head_sha}\") | .state" | tail -1)
             if [ "$review" != APPROVED ]; then
+              if [ "$review" = COMMENTED ] && gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews?per_page=100" \
+                --jq ".[] | select(.user.login == \"copilot-pull-request-reviewer[bot]\" and .commit_id == \"${head_sha}\") | .body" |
+                grep -qi 'quota limit'; then
+                echo "::error title=Copilot quota exhausted::PR #${number} cannot be approved until the reviewer's quota is available"
+                exit 1
+              fi
               echo "PR #${number}: Copilot review is ${review:-pending}; not merging"
               continue
             fi
