@@ -38,6 +38,34 @@ class OpenListUtilTest {
     }
 
     @Test
+    void connectionProbeUsesGetAndAuthorization() throws IOException {
+        OpenListUtil api = api();
+        AtomicReference<String> method = new AtomicReference<>();
+        AtomicReference<String> authorization = new AtomicReference<>();
+        server.createContext("/api/me", exchange -> {
+            method.set(exchange.getRequestMethod());
+            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            if (!"GET".equals(exchange.getRequestMethod())) {
+                exchange.sendResponseHeaders(405, -1);
+                exchange.close();
+                return;
+            }
+            reply(exchange, "{\"code\":200,\"data\":{\"id\":1}}");
+        });
+        assertTrue(api.test());
+        assertEquals("GET", method.get());
+        assertEquals("test-token", authorization.get());
+    }
+
+    @Test
+    void connectionProbeRejectsApiError() throws IOException {
+        OpenListUtil api = api();
+        server.createContext("/api/me", exchange ->
+                reply(exchange, "{\"code\":401,\"message\":\"unauthorized\"}"));
+        assertFalse(api.test());
+    }
+
+    @Test
     void retryUsesTidQueryParameter() throws IOException {
         OpenListUtil api = api();
         AtomicReference<String> query = new AtomicReference<>();

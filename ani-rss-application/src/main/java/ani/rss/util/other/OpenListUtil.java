@@ -36,7 +36,7 @@ public class OpenListUtil {
     }
 
     public Boolean test() {
-        return postApi("me")
+        return getApi("me")
                 .thenFunction(res -> success(res, "me"));
     }
 
