@@ -5,7 +5,7 @@ on:
     - cron: '17 */6 * * *'
   workflow_dispatch:
   workflow_run:
-    workflows: [Upstream sync verification]
+    workflows: [OpenList compatibility check]
     types: [completed]
   pull_request_target:
     types: [closed]
@@ -83,7 +83,7 @@ jobs:
 
           This PR merges the upstream release into the OpenList fork. It will merge automatically when verification passes, the base is current, and GitHub reports no merge conflicts. Review changes to the native OpenList downloader carefully." \
             --label upstream-sync)
-          gh workflow run upstream-verify.yml --ref "$SYNC_BRANCH"
+          gh workflow run openlist-check.yml --ref "$SYNC_BRANCH"
           echo "Opened $pr_url"
 
   merge-verified:
@@ -113,7 +113,7 @@ jobs:
                 continue
               }
             verified=$(gh run list --repo "$GITHUB_REPOSITORY" \
-              --workflow upstream-verify.yml --event workflow_dispatch --branch "$branch" --limit 100 \
+              --workflow openlist-check.yml --event workflow_dispatch --branch "$branch" --limit 100 \
               --json headSha,status,conclusion \
               --jq "any(.[]; .headSha == \"${head_sha}\" and .status == \"completed\" and .conclusion == \"success\")")
             if [ "$verified" != true ]; then

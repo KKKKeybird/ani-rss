@@ -28,7 +28,9 @@
 
 当前实现支持 Ani-RSS 创建的 OpenList 任务列表、进度和标签持久化，云端重命名与移动、完成通知、删除及保存路径调整。接口按 [OpenList v4.2.6 官方文档](https://doc.oplist.org/api/apidocs)核对，具体改动和待验证事项见 [兼容路线与实现记录](docs/openlist-compat-evaluation.md)。代码尚未在真实 OpenList Driver 上完成端到端验证，请先在测试环境使用。
 
-`main` 通过后会自动生成 [GitHub Release](https://github.com/KKKKeybird/ani-rss-openlist/releases) 并构建多架构 Docker 镜像。镜像发布到 `ghcr.io/kkkkeybird/ani-rss-openlist:latest`，OpenJ9 变体使用 `:openj9`；版本标签随每次发布生成。这个 fork 不会覆盖上游的 Docker 镜像。
+`main` 通过后会自动生成 [GitHub Release](https://github.com/KKKKeybird/ani-rss-openlist/releases) 并构建多架构 Docker 镜像。镜像发布到 `ghcr.io/kkkkeybird/ani-rss-openlist:latest`，OpenJ9 变体使用 `:openj9`；版本标签随每次发布生成。这个 fork 不会覆盖上游的 Docker 镜像。 同一上游版本的修复发布通过 `build` 的 `release_revision` 参数生成独立标签（例如 `v3.2.39-openlist-r1`），应用版本仍保持 `3.2.39`。
+
+仓库保留三个工作流：`build.yml` 发布镜像和 Release，`openlist-check.yml` 执行回归测试及完整构建，`upstream-sync.yml` 跟随上游发布并调用同一验证流程。
 
 仓库每 6 小时检查一次上游正式 Release（不含预发布），按发布时间逐个合并到 `sync/upstream-*` 分支并创建 PR。PR 会请求 Copilot 审查并运行 OpenList 回归测试与打包检查；只有 Copilot 对最新提交明确批准且检查成功，才会自动合并并触发本 fork 的 Release 和 Docker 构建。合并冲突、审查意见或检查失败时保留 PR 等待处理。GitHub Copilot 的批准能力目前属于公开预览，需在仓库设置中启用；未启用时同步 PR 会停在审查环节，不会绕过审查自动合并。跟踪的上游版本记录在 [`.github/upstream-release.txt`](.github/upstream-release.txt)。
 
